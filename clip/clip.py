@@ -18,9 +18,8 @@ try:
 except ImportError:
     BICUBIC = Image.BICUBIC
 
-
-if torch.__version__.split(".") < ["1", "7", "1"]:
-    warnings.warn("PyTorch version 1.7.1 or higher is recommended")
+# if torch.__version__.split(".") < ["1", "7", "1"]:
+#     warnings.warn("PyTorch version 1.7.1 or higher is recommended")
 
 
 __all__ = ["available_models", "load", "tokenize"]
