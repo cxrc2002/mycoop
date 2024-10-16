@@ -169,8 +169,8 @@ class Image2Prompts(nn.Module):
 
         # 应用一维卷积
         output_features = self.conv1(image_features)
-        # output_features = self.relu(output_features)
-        # output_features = self.conv2(output_features)
+        output_features = self.relu(output_features)
+        output_features = self.conv2(output_features)
         #output_features = self.linear(output_features)
         # 输出的形状是 (batch_size, n_ctx, ctx_dim)
         #print(output_features.shape)
