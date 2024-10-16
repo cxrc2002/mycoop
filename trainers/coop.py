@@ -29,12 +29,12 @@ def load_clip_to_cpu(cfg):
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
 
-    remote_weights_path = "./checkpoints/RemoteCLIP-RN50.pt"
-    remote_state_dict = torch.load(remote_weights_path, map_location="cpu")
-    model = clip.build_model(remote_state_dict)
-    message = model.load_state_dict(remote_state_dict)
-    print(message)
-    #model = clip.build_model(state_dict or model.state_dict())
+    # remote_weights_path = "./checkpoints/RemoteCLIP-RN50.pt"
+    # remote_state_dict = torch.load(remote_weights_path, map_location="cpu")
+    # model = clip.build_model(remote_state_dict)
+    # message = model.load_state_dict(remote_state_dict)
+    # print(message)
+    model = clip.build_model(state_dict or model.state_dict())
 
     return model
 
@@ -120,14 +120,14 @@ class PromptLearner(nn.Module):
         self.tokenized_prompts = tokenized_prompts  # torch.Tensor
         self.name_lens = name_lens
         self.class_token_position = cfg.TRAINER.COOP.CLASS_TOKEN_POSITION   # end middle start
-        self.w = nn.Parameter(torch.tensor(0.5, dtype=clip_model.dtype))
+        #self.w = nn.Parameter(torch.tensor(0.5, dtype=clip_model.dtype))
 
     def forward(self, img_prompts):
         batch_size = img_prompts.shape[0]
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(batch_size, -1, -1)
-            ctx = ctx + self.w*img_prompts                   # (n,n_ctx,dim)
+            ctx = ctx + img_prompts                    # (n,n_ctx,dim)
 
         if ctx.dim() == 3:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1, -1)
@@ -169,8 +169,8 @@ class Image2Prompts(nn.Module):
 
         # 应用一维卷积
         output_features = self.conv1(image_features)
-        output_features = self.relu(output_features)
-        output_features = self.conv2(output_features)
+        # output_features = self.relu(output_features)
+        # output_features = self.conv2(output_features)
         #output_features = self.linear(output_features)
         # 输出的形状是 (batch_size, n_ctx, ctx_dim)
         #print(output_features.shape)
@@ -248,6 +248,8 @@ class CoOp(TrainerX):
         for name, param in self.model.named_parameters():
             if "prompt_learner" not in name and "img2prompts" not in name:
                 param.requires_grad_(False)
+            # if "img2prompts" not in name:
+            #     param.requires_grad_(False)
             # else:
                 # print(name)
                 # print(param.requires_grad)
