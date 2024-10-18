@@ -1,5 +1,6 @@
 import os.path as osp
 
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -127,12 +128,12 @@ class PromptLearner(nn.Module):
         ctx = self.ctx
         if ctx.dim() == 2:
             ctx = ctx.unsqueeze(0).expand(batch_size, -1, -1)
-            ctx = ctx + img_prompts                    # (n,n_ctx,dim)
-
+            ctx = ctx + img_prompts              # (n, n_ctx, dim)
+            #print(ctx.shape)
         if ctx.dim() == 3:
             ctx = ctx.unsqueeze(0).expand(self.n_cls, -1, -1, -1)
-            ctx = ctx.transpose(dim0=0, dim1=1)
-            # print(ctx.shape)  #(batchsize ,classnum ,n_ctx, dim)
+            ctx = ctx.transpose(dim0=0, dim1=1)      # (batchsize, n_cls ,n_ctx, dim)
+            # print(ctx.shape)             
         prefix = self.token_prefix
         suffix = self.token_suffix
         prefix = prefix.unsqueeze(0).expand(batch_size, -1, -1, -1)
@@ -147,7 +148,7 @@ class PromptLearner(nn.Module):
                 ],
                 dim=2,
             )
-
+            # (n, n_cls, 77, dim)
         return prompts
 
 
@@ -155,6 +156,7 @@ class Image2Prompts(nn.Module):
     def __init__(self, cfg, clip_model):
         super().__init__()
         n_ctx = cfg.TRAINER.COOP.N_CTX
+        # n_ctx = n_ctx // 2
         self.conv1 = nn.Conv1d(in_channels=1, out_channels=n_ctx, kernel_size=1).to(clip_model.dtype)
         self.relu = nn.ReLU()
         self.conv2 = nn.Conv1d(in_channels=n_ctx, out_channels=n_ctx, kernel_size=1).to(clip_model.dtype)
@@ -178,6 +180,53 @@ class Image2Prompts(nn.Module):
         return output_features
 
 
+class ImgDecoder(nn.Module):
+    def __init__(self, n_ctx, clip_model):
+        super().__init__()
+
+        self.dtype = clip_model.dtype
+        self.d_model = 512
+        self.nhead = 8
+        self.num_decoder_layers = 12
+        self.n_ctx = n_ctx
+        
+        self.back_project = nn.Linear(1024, 512).to(self.dtype)
+        decoder_layer = TransformerDecoderLayer(self.d_model, self.nhead).to(self.dtype)
+        self.transformer_decoder = TransformerDecoder(decoder_layer, self.num_decoder_layers).to(self.dtype)
+
+    def forward(self, img_features):
+        
+        img_features = img_features.type(self.dtype)
+        img_features = img_features.unsqueeze(1)
+        x = self.back_project(img_features)  # (n, 1, 512)
+        batch_size = img_features.size(0)    # n
+
+        # init decoder_input
+        decoder_input = torch.zeros(batch_size, 1, self.d_model, device=img_features.device).type(self.dtype)  # (n,1,512)
+
+        # final output
+        output_sequence = []
+
+        # predict n_ctx
+        for i in range(self.n_ctx):
+            
+            decoder_output = self.transformer_decoder(decoder_input, x)
+            output_sequence.append(decoder_output)
+
+            if i < self.n_ctx - 1:  # if not the last time
+                # decoder_input = torch.cat([decoder_input, decoder_output], dim=1)  # (batchsize, i+2, d_model)
+                decoder_input = decoder_output
+
+            else:
+                break  
+
+        final_output = torch.cat(output_sequence, dim=1)  # (batchsize, n_ctx, d_model)
+
+        return final_output
+
+
+
+
 
 
 class CustomCLIP(nn.Module):
@@ -191,13 +240,19 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
+        self.imgdecoder = ImgDecoder(cfg.TRAINER.COOP.N_CTX,clip_model)
+        #self.imgdecoder.load_state_dict(torch.load("./checkpoints/imgdecoder_nctx8_batchsize50_ep100.pth"))
+        #print("succcessfully")
+
     def forward(self, image):
-        image_features = self.image_encoder(image.type(self.dtype))
-        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-        #print(image_features.shape)
-        img_prompts = self.img2prompts(image_features)
+        
+        image_features = self.image_encoder(image.type(self.dtype))     # (n, 1024)
+        img_prompts = self.imgdecoder(image_features)
+
+        #img_prompts = self.img2prompts(image_features)
         prompts = self.prompt_learner(img_prompts)
         tokenized_prompts = self.tokenized_prompts
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         logits = []
         for i in range(prompts.shape[0]):
             meta_prompts = prompts[i]
@@ -214,7 +269,7 @@ class CustomCLIP(nn.Module):
 
         logits = torch.stack(logits, dim=0)
         #print((logits.requires_grad))
-
+        #print(logits.shape)
         return logits
 
 
@@ -246,7 +301,7 @@ class CoOp(TrainerX):
 
         print("Turning off gradients in both the image and the text encoder")
         for name, param in self.model.named_parameters():
-            if "prompt_learner" not in name and "img2prompts" not in name:
+            if "prompt_learner" not in name and "imgdecoder" not in name:
                 param.requires_grad_(False)
             # if "img2prompts" not in name:
             #     param.requires_grad_(False)
@@ -263,6 +318,7 @@ class CoOp(TrainerX):
         self.sched = build_lr_scheduler(self.optim, cfg.OPTIM)
         self.register_model("prompt_learner", self.model.prompt_learner, self.optim, self.sched)
         self.register_model("img2prompts", self.model.img2prompts, self.optim, self.sched)
+        self.register_model("imgdecoder",self.model.imgdecoder,self.optim, self.sched)
 
         self.scaler = GradScaler() if cfg.TRAINER.COOP.PREC == "amp" else None
 
